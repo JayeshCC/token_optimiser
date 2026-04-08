@@ -1,3 +1,13 @@
+---
+title: Token Optimiser Environment
+emoji: 🔤
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # 🔤 Prompt & Response Token Optimization Environment
 
 > An OpenEnv-compatible RL environment that trains agents to minimize LLM API token usage while preserving semantic quality — reducing AI inference costs at scale.
