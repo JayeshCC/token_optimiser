@@ -228,6 +228,9 @@ async def run_episode(llm: OpenAI) -> None:
 
             if done:
                 break
+                
+            # Wait between steps to avoid rate limiting
+            await asyncio.sleep(2.5)
 
         # Score = average reward across steps, clamped to [0, 1]
         score = sum(rewards) / len(rewards) if rewards else 0.0

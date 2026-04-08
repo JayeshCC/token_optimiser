@@ -50,7 +50,7 @@ class TokenOptimiserEnvironment(Environment):
         # Hybrid LLM client — reads credentials from env vars at startup
         api_key = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
         api_base = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-        self._model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+        self._model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
         if OpenAI and api_key:
             self._llm = OpenAI(base_url=api_base, api_key=api_key)
         else:
@@ -178,24 +178,29 @@ class TokenOptimiserEnvironment(Environment):
 
     def _call_llm(self, prompt: str) -> tuple[str, int, int]:
         """
-        Call the real LLM with the optimized prompt.
-        Returns (response_text, input_tokens, output_tokens).
-        Falls back to rule-based simulation if LLM is unavailable.
+        Call the real LLM with retries.
         """
         if self._llm is not None:
-            try:
-                resp = self._llm.chat.completions.create(
-                    model=self._model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=200,
-                    temperature=0.3,
-                )
-                text = (resp.choices[0].message.content or "").strip()
-                in_tok = resp.usage.prompt_tokens if resp.usage else len(prompt.split())
-                out_tok = resp.usage.completion_tokens if resp.usage else len(text.split())
-                return text, in_tok, out_tok
-            except Exception as e:
-                print(f"[ENV] LLM call failed, using fallback: {e}")
+            import time
+            for attempt in range(2):  # Try twice
+                try:
+                    resp = self._llm.chat.completions.create(
+                        model=self._model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=200,
+                        temperature=0.3,
+                    )
+                    text = (resp.choices[0].message.content or "").strip()
+                    in_tok = resp.usage.prompt_tokens if resp.usage else len(prompt.split())
+                    out_tok = resp.usage.completion_tokens if resp.usage else len(text.split())
+                    return text, in_tok, out_tok
+                except Exception as e:
+                    if "429" in str(e) or "Too Many Requests" in str(e):
+                        print(f"[ENV] Rate limited, waiting 3s (attempt {attempt+1})...")
+                        time.sleep(3)
+                    else:
+                        print(f"[ENV] LLM call failed: {e}")
+                        break
 
         # Rule-based fallback
         return self._fallback_simulate(prompt)
