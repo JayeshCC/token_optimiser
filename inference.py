@@ -20,6 +20,10 @@ import textwrap
 from typing import List, Optional
 
 from openai import OpenAI
+try:
+    from huggingface_hub import HfFolder
+except Exception:  # pragma: no cover
+    HfFolder = None
 
 from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
 
@@ -28,16 +32,37 @@ from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
 # ---------------------------------------------------------------------------
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 SERVER_URL: str = os.getenv("SERVER_URL", "http://localhost:8000")
 LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")
-
+HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN")
 TASK_NAME: str = "token_optimization"
 BENCHMARK: str = "token_optimiser"
 MAX_STEPS: int = 5
 TEMPERATURE: float = 0.3
 MAX_TOKENS: int = 200
 SUCCESS_THRESHOLD: float = 0.6
+
+
+def _resolve_hf_token() -> Optional[str]:
+    """
+    Resolve API token in this order:
+    1) HF_TOKEN env var
+    2) API_KEY env var
+    3) huggingface-cli cached login token
+    """
+    token = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+    if token:
+        return token
+
+    if HfFolder is not None:
+        try:
+            return HfFolder.get_token()
+        except Exception:
+            return None
+    return None
+
+
+HF_TOKEN: Optional[str] = _resolve_hf_token()
 
 SYSTEM_PROMPT = textwrap.dedent("""
     You are a prompt optimization expert. Rewrite the given prompt to:
