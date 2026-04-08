@@ -1,0 +1,2 @@
+[console_scripts]
+server = token_optimiser.server.app:main

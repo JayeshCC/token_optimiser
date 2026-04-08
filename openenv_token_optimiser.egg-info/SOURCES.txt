@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+./__init__.py
+./client.py
+./inference.py
+./models.py
+openenv_token_optimiser.egg-info/PKG-INFO
+openenv_token_optimiser.egg-info/SOURCES.txt
+openenv_token_optimiser.egg-info/dependency_links.txt
+openenv_token_optimiser.egg-info/entry_points.txt
+openenv_token_optimiser.egg-info/requires.txt
+openenv_token_optimiser.egg-info/top_level.txt
+server/__init__.py
+server/app.py
+server/token_optimiser_environment.py
