@@ -11,8 +11,14 @@ A sandboxed LLM interaction environment where an AI agent optimizes both input p
 and expected output responses to minimize total token usage while maintaining correctness.
 """
 
+import os
 import random
 from uuid import uuid4
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -40,6 +46,15 @@ class TokenOptimiserEnvironment(Environment):
         self._task_bank = self._load_task_bank()
         self._current_task = None
         self._reset_count = 0
+
+        # Hybrid LLM client — reads credentials from env vars at startup
+        api_key = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+        api_base = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+        self._model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+        if OpenAI and api_key:
+            self._llm = OpenAI(base_url=api_base, api_key=api_key)
+        else:
+            self._llm = None
 
     def _load_task_bank(self):
         """Load the bank of prompt optimization tasks."""
@@ -109,49 +124,148 @@ class TokenOptimiserEnvironment(Environment):
             TokenOptimiserObservation with LLM response simulation and reward
         """
         self._state.step_count += 1
-
         optimized_prompt = action.optimized_prompt
+        original_prompt = self._current_task["prompt"]
 
-        # Simulate LLM response based on optimized prompt
-        simulated_response = self._simulate_llm_call(optimized_prompt)
+        # 1. Call real LLM (or fallback) to get the actual response + token counts
+        llm_response, input_tokens, output_tokens = self._call_llm(optimized_prompt)
 
-        # Calculate token usage (simplified estimation)
-        input_tokens = len(optimized_prompt.split()) * 1.3  # Rough token estimation
-        output_tokens = len(simulated_response.split()) * 1.3
+        # 2. LLM-as-judge: semantic quality score (0.0-1.0)
+        semantic_score = self._judge_semantic_quality(original_prompt, llm_response)
 
-        # Calculate reward based on multiple factors
-        reward = self._calculate_reward(
-            original_prompt=self._current_task["prompt"],
-            optimized_prompt=optimized_prompt,
-            llm_response=simulated_response,
-            expected_format=self._current_task["expected_format"],
-            reference_response=self._current_task["reference_response"],
-            input_tokens=int(input_tokens),
-            output_tokens=int(output_tokens)
+        # 3. Token efficiency: how much did we reduce vs the original prompt token count?
+        original_tokens = len(original_prompt.split()) * 1.3
+        ref_output_tokens = len(self._current_task["reference_response"].split()) * 1.3
+        ref_total = original_tokens + ref_output_tokens
+        actual_total = input_tokens + output_tokens
+        token_efficiency = max(0.0, min(0.4, (ref_total - actual_total) / max(ref_total, 1)))
+
+        # 4. Format compliance (0.0-0.2)
+        expected_fmt = self._current_task["expected_format"]
+        format_score = 0.0
+        if "bullet" in expected_fmt and any(c in llm_response for c in ("•", "*", "-", "\n")):
+            format_score = 0.2
+        elif "json" in expected_fmt.lower() and "{" in llm_response and "}" in llm_response:
+            format_score = 0.2
+        elif "brief" in expected_fmt and len(llm_response.split()) < 30:
+            format_score = 0.2
+
+        # 5. Length penalty if output way too long
+        max_out = self._current_task["max_output_tokens"]
+        length_penalty = -0.1 if output_tokens > max_out * 2 else 0.0
+
+        # Final reward: weighted hybrid
+        reward = (
+            token_efficiency            # 0.0 - 0.4   (token saving)
+            + semantic_score * 0.3      # 0.0 - 0.3   (LLM judge quality)
+            + format_score              # 0.0 - 0.2   (format compliance)
+            + length_penalty            # 0.0 or -0.1 (penalty)
+        )
+        reward = max(0.0, min(1.0, reward))
+
+        print(
+            f"[ENV] tok_eff={token_efficiency:.2f} semantic={semantic_score:.2f} "
+            f"fmt={format_score:.2f} => reward={reward:.2f}",
+            flush=True,
         )
 
         return TokenOptimiserObservation(
-            llm_response=simulated_response,
+            llm_response=llm_response,
             input_tokens=int(input_tokens),
             output_tokens=int(output_tokens),
             reward=reward
         )
 
-    def _simulate_llm_call(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str) -> tuple[str, int, int]:
         """
-        Simulate an LLM response to the optimized prompt.
-        In a real implementation, this would call an actual LLM API.
+        Call the real LLM with the optimized prompt.
+        Returns (response_text, input_tokens, output_tokens).
+        Falls back to rule-based simulation if LLM is unavailable.
         """
-        # Simple simulation based on prompt content
-        if "machine learning" in prompt.lower() and ("brief" in prompt.lower() or "short" in prompt.lower()):
-            return "Machine learning is AI that learns from data to make predictions."
-        elif "bullet point" in prompt.lower():
-            return "• Solar power growing rapidly\n• Wind energy investments increasing\n• Hydroelectric power stable\n• Battery storage advancing\n• Global renewable adoption rising"
-        elif "json" in prompt.lower() and ("key" in prompt.lower() or ":" in prompt.lower()):
-            return '{"top_categories": ["electronics", "software"], "growth_regions": ["Asia", "Africa"], "responsive_segments": ["professionals"], "budget_allocation": {"email": 0.4, "social": 0.3, "search": 0.2, "tv": 0.1}, "risks_watch": ["inflation", "supply_chain"]}'
+        if self._llm is not None:
+            try:
+                resp = self._llm.chat.completions.create(
+                    model=self._model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.3,
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                in_tok = resp.usage.prompt_tokens if resp.usage else len(prompt.split())
+                out_tok = resp.usage.completion_tokens if resp.usage else len(text.split())
+                return text, in_tok, out_tok
+            except Exception as e:
+                print(f"[ENV] LLM call failed, using fallback: {e}")
+
+        # Rule-based fallback
+        return self._fallback_simulate(prompt)
+
+    def _fallback_simulate(self, prompt: str) -> tuple[str, int, int]:
+        """Fast deterministic fallback when LLM is unavailable."""
+        if self._current_task is None:
+            text = "No task loaded."
+            return text, len(prompt.split()), len(text.split())
+
+        expected_format = self._current_task["expected_format"]
+        original_words = len(self._current_task["prompt"].split())
+        compression_ratio = len(prompt.split()) / max(original_words, 1)
+
+        if "brief explanation" in expected_format:
+            text = ("Machine learning is AI that learns from data to make predictions."
+                    if compression_ratio <= 0.6
+                    else "Machine learning enables systems to learn from experience and improve without explicit programming.")
+        elif "bullet" in expected_format:
+            text = ("• Solar power growing rapidly\n• Wind energy investments increasing\n• Hydroelectric power stable\n• Battery storage advancing\n• Global renewable adoption rising"
+                    if compression_ratio <= 0.7
+                    else "Renewable energy sectors are growing, led by solar and wind with strong policy support.")
+        elif "json" in expected_format.lower():
+            text = ('{"top_categories": ["electronics", "software"], "growth_regions": ["Asia", "Africa"], "responsive_segments": ["professionals"], "budget_allocation": {"email": 0.4, "social": 0.3}, "risks_watch": ["inflation"]}'  # noqa
+                    if compression_ratio <= 0.6
+                    else "Key categories: electronics, software. Growth in Asia and Africa.")
         else:
-            # Default response - would be improved with better prompting
-            return "I understand your request and will provide a helpful response based on the information given."
+            text = "I understand your request and will provide a helpful response."
+
+        in_tok = int(len(prompt.split()) * 1.3)
+        out_tok = int(len(text.split()) * 1.3)
+        return text, in_tok, out_tok
+
+    def _judge_semantic_quality(self, original_prompt: str, response: str) -> float:
+        """
+        LLM-as-judge: score how well the response answers the original prompt.
+        Returns a float 0.0-1.0.
+        """
+        if self._llm is None:
+            return self._keyword_fallback_score(original_prompt, response)
+
+        judge_prompt = (
+            f"Rate 0 to 10 how well the RESPONSE answers the ORIGINAL question. "
+            f"Consider accuracy and completeness. Reply with a single integer only.\n\n"
+            f"ORIGINAL: {original_prompt[:300]}\n\nRESPONSE: {response[:400]}"
+        )
+        try:
+            resp = self._llm.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": judge_prompt}],
+                max_tokens=5,
+                temperature=0.0,
+            )
+            raw = (resp.choices[0].message.content or "5").strip()
+            score = int("".join(c for c in raw if c.isdigit())[:2] or "5")
+            return min(max(score / 10.0, 0.0), 1.0)
+        except Exception:
+            return self._keyword_fallback_score(original_prompt, response)
+
+    def _keyword_fallback_score(self, original_prompt: str, response: str) -> float:
+        """Simple keyword overlap as semantic score when judge is unavailable."""
+        key_concepts = {
+            "machine", "learning", "ai", "data", "predict", "solar", "wind",
+            "energy", "renewable", "sales", "customer", "product", "market",
+            "budget", "analysis", "trend", "growth", "json", "bullet",
+        }
+        orig = set(original_prompt.lower().split()) & key_concepts
+        resp = set(response.lower().split()) & key_concepts
+        raw = (len(resp) / len(orig)) if orig else 0.5
+        return min(raw, 1.0)
 
     def _calculate_reward(self, original_prompt: str, optimized_prompt: str,
                          llm_response: str, expected_format: str, reference_response: str,

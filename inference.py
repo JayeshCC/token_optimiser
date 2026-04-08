@@ -1,43 +1,17 @@
-"""Inference Script Example
-===================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-    LOCAL_IMAGE_NAME The name of the local image to use for the environment if you are using from_docker_image() method
+"""
+Inference Script — Token Optimiser Environment
+================================================
+STDOUT FORMAT (mandatory):
+  [START] task=<task> env=<env> model=<model>
+  [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 
-- Defaults are set only for API_BASE_URL and MODEL_NAME
-    (and should reflect your active inference setup):
-    API_BASE_URL = os.getenv("API_BASE_URL", "<your-active-endpoint>")
-    MODEL_NAME = os.getenv("MODEL_NAME", "<your-active-model>")
-
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
-
-STDOUT FORMAT
-- The script must emit exactly three line types to stdout, in this order:
-
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
-
-  Rules:
-    - One [START] line at episode begin.
-    - One [STEP] line per step, immediately after env.step() returns.
-    - One [END] line after env.close(), always emitted (even on exception).
-    - reward and rewards are formatted to 2 decimal places.
-    - done and success are lowercase booleans: true or false.
-    - error is the raw last_action_error string, or null if none.
-    - All fields on a single line with no newlines within a line.
-    - Each tasks should return score in [0, 1]
-
-  Example:
-    [START] task=click-test env=miniwob model=Qwen3-VL-30B
-    [STEP] step=1 action=click('123') reward=0.00 done=false error=null
-    [STEP] step=2 action=fill('456','text') reward=0.00 done=false error=null
-    [STEP] step=3 action=click('789') reward=1.00 done=true error=null
-    [END] success=true steps=3 score=1.00 rewards=0.00,0.00,1.00
+Environment variables required:
+  HF_TOKEN       — Hugging Face API key
+  API_BASE_URL   — LLM endpoint  (default: https://router.huggingface.co/v1)
+  MODEL_NAME     — Model id       (default: Qwen/Qwen2.5-72B-Instruct)
+  SERVER_URL     — Running env server (default: http://localhost:8000)
+  LOCAL_IMAGE_NAME — Docker image name (optional; spins up container if set)
 """
 
 import asyncio
@@ -47,97 +21,148 @@ from typing import List, Optional
 
 from openai import OpenAI
 
-# Import the environment - this will need to be adjusted based on the actual environment name
-# For now, we'll comment this out and use a placeholder since we don't have the actual env yet
-# from my_env_v4 import MyEnvV4Action, MyEnvV4Env
+from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
 
-# Configuration from environment variables with defaults
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # For docker image usage
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+SERVER_URL: str = os.getenv("SERVER_URL", "http://localhost:8000")
+LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")
 
-TASK_NAME = os.getenv("TOKEN_OPTIMISER_TASK", "token_optimization")
-BENCHMARK = os.getenv("TOKEN_OPTIMISER_BENCHMARK", "token_optimiser")
-MAX_STEPS = 8
-TEMPERATURE = 0.7
-MAX_TOKENS = 150
-SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0, 1]
+TASK_NAME: str = "token_optimization"
+BENCHMARK: str = "token_optimiser"
+MAX_STEPS: int = 5
+TEMPERATURE: float = 0.3
+MAX_TOKENS: int = 200
+SUCCESS_THRESHOLD: float = 0.6
 
-# Max possible reward: each token contributes 0.1, across all steps
-_MAX_REWARD_PER_STEP = MAX_TOKENS * 0.1
-MAX_TOTAL_REWARD = MAX_STEPS * _MAX_REWARD_PER_STEP
+SYSTEM_PROMPT = textwrap.dedent("""
+    You are a prompt optimization expert. Rewrite the given prompt to:
+    1. Use the fewest possible tokens (concise language, no filler words)
+    2. Preserve full semantic meaning and intent
+    3. Add explicit output-format constraints (e.g., "in 5 bullet points", "as JSON with keys: …")
+    4. Guide the responder toward a shorter, precise answer
 
-SYSTEM_PROMPT = textwrap.dedent(
-    """
-    You are a helpful AI assistant tasked with optimizing prompts and responses
-    to minimize token usage while preserving semantic meaning and correctness.
-    Your goal is to provide concise, accurate responses that fulfill the user's intent
-    using as few tokens as possible.
-    Reply with exactly one message string — no quotes, no prefixes, just the message text.
-    """
-).strip()
+    Reply with ONLY the optimized prompt — no explanations, no prefixes, no quotes.
+""").strip()
+
+# ---------------------------------------------------------------------------
+# Logging helpers (mandatory format)
+# ---------------------------------------------------------------------------
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
+
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    # Truncate action for readability but keep it on one line
+    action_short = action.replace("\n", " ")[:120]
     error_val = error if error else "null"
-    done_val = str(done).lower()
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        f"[STEP] step={step} action={action_short!r} "
+        f"reward={reward:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
+
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
-# Placeholder functions - these would be replaced with actual environment interaction
-def build_user_prompt(step: int, last_echoed: str, last_reward: float, history: List[str]) -> str:
-    history_block = "\n".join(history[-4:]) if history else "None"
-    return textwrap.dedent(
-        f"""
-        Step: {step}
-        Last echoed message: {last_echoed!r}
-        Last reward: {last_reward:.2f}
-        Previous steps:
+
+# ---------------------------------------------------------------------------
+# LLM helpers
+# ---------------------------------------------------------------------------
+
+def _build_user_message(original_prompt: str, step: int,
+                         prev_reward: float, prev_response: str,
+                         history: List[str]) -> str:
+    if step == 1:
+        return (
+            f"Optimize this prompt to minimize tokens while preserving all meaning:\n\n"
+            f"{original_prompt}"
+        )
+    history_block = "\n".join(history[-3:]) if history else "None"
+    return textwrap.dedent(f"""
+        Original prompt:
+        {original_prompt}
+
+        Your last optimized version got reward: {prev_reward:.2f}
+        LLM responded with: {prev_response!r}
+
+        Recent history:
         {history_block}
-        Send your next message.
-        """
-    ).strip()
 
-def get_model_message(client: OpenAI, step: int, last_echoed: str, last_reward: float, history: List[str]) -> str:
-    user_prompt = build_user_prompt(step, last_echoed, last_reward, history)
+        Improve your optimization further. Reply with ONLY the new optimized prompt.
+    """).strip()
+
+
+def get_optimized_prompt(
+    llm: OpenAI,
+    original_prompt: str,
+    step: int,
+    prev_reward: float,
+    prev_response: str,
+    history: List[str],
+) -> str:
+    user_msg = _build_user_message(original_prompt, step, prev_reward, prev_response, history)
     try:
-        completion = client.chat.completions.create(
+        completion = llm.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_msg},
             ],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
-            stream=False,
         )
-        text = (completion.choices[0].message.content or "").strip()
-        return text if text else "hello"
+        result = (completion.choices[0].message.content or "").strip()
+        return result if result else "Explain briefly."
     except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        return "hello"
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        return _rule_based_compress(original_prompt, step)
 
-async def main() -> None:
-    # Check if HF_TOKEN is available
-    if not HF_TOKEN:
-        print("[ERROR] HF_TOKEN environment variable not set")
-        return
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+# Rule-based fallback compressor (used when LLM is unavailable)
+_FILLER = {
+    "please", "kindly", "could", "you", "can", "i", "need", "want", "would",
+    "like", "very", "really", "just", "actually", "basically", "specifically",
+    "a", "an", "the", "in", "of", "to", "and", "that", "is", "are", "be",
+    "will", "should", "must", "have", "has", "do", "does", "for", "with",
+    "as", "at", "by", "on", "or", "but", "it", "its", "this",
+}
+_BREVITY = [
+    "",                                    # step 1 — just strip fillers
+    " Be brief.",                           # step 2
+    " Limit response to 3 sentences.",      # step 3
+    " Reply in one sentence.",              # step 4+
+]
 
-    # For now, we'll simulate the environment interaction since we don't have the actual env class
-    # In a real implementation, this would use: env = await MyEnvV4Env.from_docker_image(LOCAL_IMAGE_NAME)
 
-    history: List[str] = []
+def _rule_based_compress(original_prompt: str, step: int = 1) -> str:
+    """Strip filler words and add a conciseness constraint."""
+    words = original_prompt.split()
+    compressed = [
+        w for w in words
+        if w.lower().rstrip(".,?!") not in _FILLER
+    ]
+    suffix = _BREVITY[min(step - 1, len(_BREVITY) - 1)]
+    result = " ".join(compressed) + suffix
+    return result if result.strip() else original_prompt
+
+
+# ---------------------------------------------------------------------------
+# Main episode loop
+# ---------------------------------------------------------------------------
+
+async def run_episode(llm: OpenAI) -> None:
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
@@ -145,48 +170,88 @@ async def main() -> None:
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
+    # Connect to environment
+    if LOCAL_IMAGE_NAME:
+        env = await TokenOptimiserEnv.from_docker_image(LOCAL_IMAGE_NAME)
+    else:
+        env = TokenOptimiserEnv(base_url=SERVER_URL)
+        await env.connect()
+
     try:
-        # Simulate environment reset
-        last_echoed = "Initial state"
-        last_reward = 0.0
+        # Reset — get initial observation
+        reset_result = await env.reset()
+
+        # Fetch original prompt from server state
+        env_state = await env.state()
+        original_prompt: str = env_state.original_prompt or "Explain machine learning briefly."
+
+        print(
+            f"[DEBUG] Task difficulty={env_state.task_difficulty} | "
+            f"Original prompt ({len(original_prompt.split())} words): {original_prompt[:80]}...",
+            flush=True,
+        )
+
+        prev_reward = 0.0
+        prev_response = ""
+        history: List[str] = []
 
         for step in range(1, MAX_STEPS + 1):
-            # In real implementation, we would check if result.done from env.reset()
-            # For simulation, we'll just run the steps
+            # Ask LLM to optimize the prompt
+            optimized = get_optimized_prompt(
+                llm, original_prompt, step, prev_reward, prev_response, history
+            )
 
-            message = get_model_message(client, step, last_echoed, last_reward, history)
-
-            # Simulate environment step - in reality this would be:
-            # result = await env.step(MyEnvV4Action(message=message))
-            # For now, we'll simulate a simple response
-
-            # Simulate observation, reward, done status
-            obs = type('Observation', (), {'echoed_message': message})()
-            reward = len(message) * 0.01  # Simple reward based on length
-            done = step >= MAX_STEPS  # Done after max steps
-            error = None
+            # Step the environment with the optimized prompt
+            error_msg: Optional[str] = None
+            reward = 0.0
+            done = False
+            try:
+                result = await env.step(TokenOptimiserAction(optimized_prompt=optimized))
+                obs = result.observation
+                reward = result.reward          # server puts reward at top-level, not inside obs
+                done = result.done or (step >= MAX_STEPS)
+                prev_response = obs.llm_response
+                print(
+                    f"[DEBUG] tokens in={obs.input_tokens} out={obs.output_tokens}",
+                    flush=True,
+                )
+            except Exception as exc:
+                error_msg = str(exc)
+                done = True
 
             rewards.append(reward)
             steps_taken = step
-            last_echoed = obs.echoed_message
-            last_reward = reward
+            prev_reward = reward
+            history.append(f"step={step} prompt={optimized!r:.60} reward={reward:.2f}")
 
-            log_step(step=step, action=message, reward=reward, done=done, error=error)
-
-            history.append(f"Step {step}: {message!r} -> reward {reward:+.2f}")
+            log_step(step=step, action=optimized, reward=reward, done=done, error=error_msg)
 
             if done:
                 break
 
-        # Calculate score
-        score = sum(rewards) / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
-        score = min(max(score, 0.0), 1.0)  # clamp to [0, 1]
-        success = score >= SUCCESS_SCORE_THRESHOLD
+        # Score = average reward across steps, clamped to [0, 1]
+        score = sum(rewards) / len(rewards) if rewards else 0.0
+        score = max(0.0, min(1.0, score))
+        success = score >= SUCCESS_THRESHOLD
 
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}", flush=True)
     finally:
-        # In real implementation: await env.close()
-        pass
+        try:
+            await env.close()
+        except Exception:
+            pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+async def main() -> None:
+    if not HF_TOKEN:
+        print("[ERROR] HF_TOKEN environment variable not set. Exiting.", flush=True)
+        return
+
+    llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    await run_episode(llm)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

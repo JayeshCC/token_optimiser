@@ -1,207 +1,269 @@
-# Prompt & Response Token Optimization Environment
+# 🔤 Prompt & Response Token Optimization Environment
 
-## Environment Description
+> An OpenEnv-compatible RL environment that trains agents to minimize LLM API token usage while preserving semantic quality — reducing AI inference costs at scale.
 
-A sandboxed LLM interaction environment where an AI agent is responsible for optimizing both input prompts and expected output responses to minimize total token usage. The environment simulates real-world API usage (e.g., LLM calls), including cost constraints, context limits, and response length control, ensuring efficient and scalable AI interactions.
+---
 
-## Motivation
+## 📌 Introduction
 
-Large Language Model (LLM) API usage can be expensive at scale, with costs directly proportional to token consumption. This environment trains agents to reduce AI inference costs by intelligently optimizing prompts while maintaining response quality - a valuable skill for production LLM applications where cost efficiency is paramount.
+Large Language Model APIs charge per token. Verbose prompts and unconstrained responses waste tokens and money. This environment trains an AI agent to **rewrite verbose prompts into concise, efficient versions** that:
 
-## Action and Observation Spaces
+- Use fewer input tokens
+- Guide the LLM toward shorter, correctly-formatted responses
+- Preserve the full semantic meaning and intent of the original request
+- Respect output format constraints (free text, bullet points, JSON)
+
+The agent learns real-world prompt engineering — a critical skill for production LLM systems where cost efficiency matters at scale.
+
+---
+
+## 🏗️ Architecture
+
+```
+token_optimiser/
+├── inference.py                        # Hackathon evaluation script
+├── models.py                           # Pydantic data models (Action / Observation / State)
+├── client.py                           # Async WebSocket EnvClient
+├── openenv.yaml                        # OpenEnv deployment config
+├── Dockerfile                          # Root-level multi-stage build
+├── pyproject.toml                      # Package config & dependencies
+├── uv.lock                             # Locked dependencies
+└── server/
+    ├── app.py                          # FastAPI server (WebSocket + HTTP)
+    ├── token_optimiser_environment.py  # Core RL environment logic
+    └── requirements.txt                # Server dependencies
+```
+
+---
+
+## 🧠 How It Works
 
 ### Action Space
-- **Type**: `TokenOptimiserAction`
-- **Field**: `optimized_prompt: str`
-- **Description**: The agent's optimized version of the user prompt, designed to:
-  - Reduce unnecessary input tokens
-  - Guide the LLM toward shorter, more precise responses
-  - Specify output format constraints (bullets, JSON, etc.)
-  - Include context/cost awareness instructions
+The agent submits a **`TokenOptimiserAction`** containing its optimized version of the original prompt:
+
+```python
+class TokenOptimiserAction(Action):
+    optimized_prompt: str   # Agent's rewritten, token-efficient prompt
+```
 
 ### Observation Space
-- **Type**: `TokenOptimiserObservation`
-- **Fields**:
-  - `llm_response: str` - The LLM's response to the optimized prompt
-  - `input_tokens: int` - Token count of the optimized prompt
-  - `output_tokens: int` - Token count of the LLM response
-  - `reward: float` - Reward score for this step (0.0-1.0)
+After each step, the agent receives a **`TokenOptimiserObservation`**:
+
+```python
+class TokenOptimiserObservation(Observation):
+    llm_response: str    # Actual LLM response to the optimized prompt
+    input_tokens: int    # Token count of the optimized prompt
+    output_tokens: int   # Token count of the LLM response
+    reward: float        # Step reward (0.0 – 1.0)
+```
 
 ### State Space
-- **Type**: `TokenOptimiserState`
-- **Fields**:
-  - `episode_id: str` - Unique identifier for the current episode
-  - `step_count: int` - Number of steps taken in current episode
-  - `original_prompt: str` - The initial user prompt/task
-  - `task_difficulty: str` - Current difficulty level (easy/medium/hard)
-  - `task_index: int` - Index of current task in task bank
+```python
+class TokenOptimiserState(State):
+    original_prompt: str      # The verbose task prompt the agent must optimize
+    task_difficulty: str      # "easy" | "medium" | "hard"
+    task_index: int           # Index in task bank
+```
 
-## Tasks
+---
 
-The environment includes 3 progressively difficult tasks:
+## 📋 Tasks
 
-### Easy Task
-- **Prompt**: "Can you please explain in a very detailed manner what machine learning is and how it works step by step?"
-- **Goal**: Reduce input tokens + guide model to shorter, precise response
-- **Example Optimization**: 
-  - Input: "Can you please explain in a very detailed manner what machine learning is and how it works step by step?"
-  - Optimized: "Explain machine learning briefly."
-  - Expected Output: Concise definition under 50 tokens
+### 🟢 Easy — Verbosity Reduction
+**Original:** `"Can you please explain in a very detailed manner what machine learning is and how it works step by step?"`  
+**Goal:** Strip filler words, compress to core query  
+**Expected optimized:** `"Explain machine learning briefly."`  
+**Max output:** 50 tokens
 
-### Medium Task
-- **Prompt**: "I need a comprehensive analysis of the renewable energy market trends over the past decade, including solar, wind, and hydroelectric power growth rates, investment patterns, technological advancements, and policy impacts across different regions globally."
-- **Goal**: Compress input + add output constraints + ensure structured response
-- **Example Optimization**: 
-  - Add: "Limit response to 5 bullet points"
-  - Remove: Redundant temporal/geographic qualifiers
-  - Preserve: Core request for trend analysis
-  - Expected Output: 5 bullet points under 100 tokens
+### 🟡 Medium — Format Constraint Addition
+**Original:** `"I need a comprehensive analysis of the renewable energy market trends over the past decade, including solar, wind, and hydroelectric power growth rates..."`  
+**Goal:** Compress input AND add explicit output format constraints  
+**Expected optimized:** `"Summarize 2013-2023 renewable energy trends: solar, wind, hydro. In 5 bullet points."`  
+**Max output:** 100 tokens
 
-### Hard Task
-- **Prompt**: "As a senior data scientist, I need you to analyze our Q3 sales performance dataset and provide actionable insights. The dataset contains: customer demographics, purchase history, product categories, regional sales data, marketing campaign ROI, seasonal trends, and competitor analysis. Please identify: 1) Our top 3 performing product categories and why, 2) Geographic regions with highest growth potential, 3) Customer segments most responsive to our email campaigns, 4) Optimal marketing budget allocation for Q4, and 5) Risks to watch based on economic indicators."
-- **Goal**: Minimize total tokens (input+output) while maintaining correctness + adapting to context limits
-- **Example Optimization**: 
-  - Specify: JSON format with exact keys
-  - Remove: Excessive background/methodology details
-  - Preserve: All 5 requested analytical components
-  - Expected Output: JSON with 5 specific keys under 200 tokens
+### 🔴 Hard — Multi-Intent Structured Output
+**Original:** 82-word complex data science analysis request with 5 sub-tasks  
+**Goal:** Minimize total tokens (input + output) while producing structured JSON with all 5 required keys  
+**Expected optimized:** Compressed prompt specifying `JSON with keys: top_categories, growth_regions, responsive_segments, budget_allocation, risks_watch`  
+**Max output:** 200 tokens
 
-## Reward Function
+---
 
-The reward function provides rich, multi-component feedback:
+## 🏆 Reward Function
 
-### Score Ranges
-- **0.0**: Meaning lost, incorrect output, or system failure
-- **0.3-0.5**: Token reduction achieved but output quality degraded
-- **0.6-0.8**: Balanced optimization (good reduction + acceptable output)
-- **0.9-1.0**: Optimal solution:
-  - Minimal tokens (input + output)
-  - Full semantic preservation
-  - Correct and structured response
+**Hybrid grading** — combines token efficiency + LLM-as-judge semantic scoring:
 
-### Components
-1. **Token Efficiency (0.0-0.4)**: Reduction in combined input+output tokens vs. baseline
-2. **Semantic Preservation (0.0-0.3)**: Meaning retention vs. original intent
-3. **Format Compliance (0.0-0.2)**: Adherence to required structure (bullets, JSON, etc.)
-4. **Length Appropriateness (0.0-0.1): Response within expected length bounds**
-5. **Cost Simulation Bonus (0.0-0.05)**: Reward for token efficiency
-6. **Latency Penalty**: For excessively long outputs
-7. **Context Penalty**: For exceeding simulated window limits
+| Component | Weight | Description |
+|-----------|--------|-------------|
+| Token Efficiency | 0.0 – 0.40 | Tokens saved vs. reference (input + output combined) |
+| Semantic Quality | 0.0 – 0.30 | LLM judge rates response quality 0–10 |
+| Format Compliance | 0.0 – 0.20 | Response matches required format (bullets / JSON / brief) |
+| Length Penalty | −0.10 | Output exceeds 2× max token budget |
 
-## Setup and Usage
+```
+reward = token_efficiency + (semantic_score × 0.3) + format_score + length_penalty
+reward = clamp(reward, 0.0, 1.0)
+```
+
+| Score | Meaning |
+|-------|---------|
+| 0.0 | Meaning lost, system failure, or no optimization |
+| 0.3 – 0.5 | Token reduction achieved but quality degraded |
+| 0.6 – 0.8 | Good balance of compression and quality |
+| 0.9 – 1.0 | Optimal: minimal tokens, correct format, meaning preserved |
+
+---
+
+## ⚙️ Setup & Installation
 
 ### Prerequisites
-- Python 3.8+
-- openenv-core package
-- Hugging Face API token (HF_TOKEN)
-- Environment variables set:
-  - `API_BASE_URL` (default: https://router.huggingface.co/v1)
-  - `MODEL_NAME` (default: Qwen/Qwen2.5-72B-Instruct)
-  - `HF_TOKEN` (your Hugging Face API key)
+- Python 3.10+
+- [`uv`](https://github.com/astral-sh/uv) (recommended) or `pip`
+- A Hugging Face account with a token that has **Inference Providers** permission
 
-### Installation
+### 1. Clone and Install
+
 ```bash
-# Install the environment in development mode
+git clone <your-repo-url>
+cd token_optimiser
+
+# Install with uv (recommended)
+uv sync
+
+# Or with pip
 pip install -e .
-
-# Or with UV (recommended)
-uv pip install -e .
 ```
 
-### Local Development
+### 2. Set Environment Variables
+
 ```bash
-# Start the environment server
-uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
+# Required
+export HF_TOKEN="hf_your_token_here"
 
-# Or use the provided script
-python -m server.app
+# Optional (these are the defaults)
+export API_BASE_URL="https://router.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
+export SERVER_URL="http://localhost:8000"
 ```
 
-### Docker Deployment
+On Windows (PowerShell):
+```powershell
+$env:HF_TOKEN = "hf_your_token_here"
+```
+
+> **HF Token Permissions:** Your token must have **"Make calls to Inference Providers"** enabled.  
+> Create/edit at → https://huggingface.co/settings/tokens
+
+---
+
+## 🚀 Running Locally
+
+### Step 1 — Start the Environment Server
+
 ```bash
-# Build the Docker image
-docker build -t token_optimiser:latest .
-
-# Run the container
-docker run -p 8000:8000 token_optimiser:latest
-```
-
-### Hugging Face Spaces Deployment
-```bash
-# Push to Hugging Face Spaces (requires HF CLI login)
-openenv push --repo-id your-username/token-optimiser-env
-```
-
-### Using the EnvClient
-```python
-from client import TokenOptimiserEnv
-
-# Connect to local server
-with TokenOptimiserEnv(base_url="http://localhost:8000") as client:
-    obs = client.reset()
-    print(f"Original prompt: {obs.original_prompt}")
-    
-    # Agent optimizes the prompt
-    action = TokenOptimiserAction(optimized_prompt="Explain machine learning briefly")
-    result = client.step(action)
-    
-    print(f"LLM Response: {result.observation.llm_response}")
-    print(f"Reward: {result.reward}")
-    print(f"Tokens - Input: {result.observation.input_tokens}, Output: {result.observation.output_tokens}")
-
-# Or use Docker deployment
-client = TokenOptimiserEnv.from_docker_image("token_optimiser-env:latest")
-try:
-    # ... interaction logic ...
-finally:
-    client.close()
-```
-
-## Baseline Inference Script
-
-The environment includes a baseline inference script (`inference.py`) that:
-- Uses OpenAI client routed through Hugging Face API
-- Implements a basic prompt optimization strategy
-- Emits structured logs in the required [START]/[STEP]/[END] format
-- Runs against all task difficulties
-- Produces reproducible baseline scores
-
-Run the baseline:
-```bash
-python inference.py
-```
-
-Expected output format:
-```
-[START] task=token_optimisation env=token_optimiser model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action=Explain machine learning briefly reward=0.75 done=false error=null
-[END] success=true steps=1 score=0.75 rewards=0.75
-```
-
-## Validation
-
-Validate OpenEnv specification compliance:
-```bash
-openenv validate
+# Terminal 1
+uv run uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
 Expected output:
 ```
-✓ OpenEnv specification validation passed
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
 ```
 
-## Requirements
+### Step 2 — Run the Inference Script
 
-- Python 3.8+
-- openenv-core >= 0.2.0
-- huggingface_hub >= 0.20.0
-- openai >= 2.7.2
-- fastapi >= 0.104.0
-- uvicorn >= 0.24.0
-- pydantic >= 2.0.0
+```bash
+# Terminal 2
+uv run inference.py
+```
 
-See `pyproject.toml` for full dependency list.
+Expected output:
+```
+[START] task=token_optimization env=token_optimiser model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action='Analyze renewable energy trends...' reward=0.62 done=false error=null
+[STEP] step=2 action='Summarize 2013-2023 renewable energy...' reward=0.81 done=false error=null
+[STEP] step=3 action='Renewable energy trends 2013-2023...' reward=0.84 done=false error=null
+[STEP] step=4 action='Renewable energy 2013-2023 trends...' reward=0.82 done=false error=null
+[STEP] step=5 action='Energy trends 2013-2023: solar, wind...' reward=0.81 done=true error=null
+[END] success=true steps=5 score=0.780 rewards=0.62,0.81,0.84,0.82,0.81
+```
 
-## License
+### Step 3 — (Optional) Run via Docker
 
-This environment is released under the MIT License.
+```bash
+# Build
+docker build -t token-optimiser-env .
+
+# Run
+docker run -p 8000:8000 \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e API_BASE_URL=$API_BASE_URL \
+  token-optimiser-env
+```
+
+---
+
+## 🐍 Using the Python Client
+
+```python
+import asyncio
+from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
+
+async def main():
+    async with TokenOptimiserEnv(base_url="http://localhost:8000") as env:
+        # Reset — get the task
+        result = await env.reset()
+        state = await env.state()
+        print(f"Task: {state.original_prompt}")
+        print(f"Difficulty: {state.task_difficulty}")
+
+        # Agent submits an optimized prompt
+        result = await env.step(
+            TokenOptimiserAction(optimized_prompt="Explain machine learning briefly.")
+        )
+        print(f"LLM Response: {result.observation.llm_response}")
+        print(f"Reward: {result.reward}")
+        print(f"Tokens — in: {result.observation.input_tokens}, out: {result.observation.output_tokens}")
+
+asyncio.run(main())
+```
+
+---
+
+## ☁️ Deployment
+
+Deploy to Hugging Face Spaces using the OpenEnv CLI:
+
+```bash
+openenv push
+```
+
+---
+
+## 🔧 Environment Variables Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HF_TOKEN` | *(required)* | Hugging Face API key with Inference Providers permission |
+| `API_BASE_URL` | `https://router.huggingface.co/v1` | LLM endpoint URL |
+| `MODEL_NAME` | `Qwen/Qwen2.5-72B-Instruct` | Model used for responses and judging |
+| `SERVER_URL` | `http://localhost:8000` | Environment server URL (for inference.py) |
+| `LOCAL_IMAGE_NAME` | *(optional)* | Docker image name — auto-spins container if set |
+
+---
+
+## 📦 Dependencies
+
+- [`openenv-core`](https://github.com/meta-pytorch/OpenEnv) ≥ 0.2.2 — RL environment framework
+- `openai` — LLM API client (routed through HF)
+- `fastapi` + `uvicorn` — Environment server
+- `pydantic` v2 — Data model validation
+
+See [`pyproject.toml`](./pyproject.toml) for the full pinned dependency list.
+
+---
+
+## 📄 License
+
+BSD License — see source files for details.
