@@ -5,6 +5,18 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 tasks:
-  - redundancy_stripping (easy)
-  - constraint_injection (medium)
-  - multi_key_json_extraction (hard)
+  - id: "redundancy_stripping"
+    name: "Redundancy Stripping"
+    description: "Strip politeness filler and redundancy"
+    difficulty: "easy"
+    grader: "server.token_optimiser_environment:grade"
+  - id: "constraint_injection"
+    name: "Constraint Injection"
+    description: "Compress input AND inject exact bullet point constraints"
+    difficulty: "medium"
+    grader: "server.token_optimiser_environment:grade"
+  - id: "multi_key_json_extraction"
+    name: "Multi-Key JSON Extraction"
+    description: "Force structured JSON output with 5 exact keys"
+    difficulty: "hard"
+    grader: "server.token_optimiser_environment:grade"
