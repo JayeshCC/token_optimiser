@@ -15,6 +15,7 @@ Environment variables required:
 """
 
 import asyncio
+import logging
 import os
 import textwrap
 from typing import List, Optional
@@ -26,6 +27,14 @@ except Exception:  # pragma: no cover
     HfFolder = None
 
 from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
+
+logger = logging.getLogger("TokenOptimiserFrontend")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('\033[96m%(asctime)s\033[0m | \033[93m%(levelname)-7s\033[0m | \033[1mCLIENT\033[0m | %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -151,7 +160,7 @@ def get_optimized_prompt(
         result = (completion.choices[0].message.content or "").strip()
         return result if result else "Explain briefly."
     except Exception as exc:
-        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        logger.warning(f"LLM call failed, falling back to basic rule compression: {exc}")
         return _rule_based_compress(original_prompt, step)
 
 
@@ -210,11 +219,8 @@ async def run_episode(llm: OpenAI) -> None:
         env_state = await env.state()
         original_prompt: str = env_state.original_prompt or "Explain machine learning briefly."
 
-        print(
-            f"[DEBUG] Task difficulty={env_state.task_difficulty} | "
-            f"Original prompt ({len(original_prompt.split())} words): {original_prompt[:80]}...",
-            flush=True,
-        )
+        logger.info(f"Task connected. Difficulty: {env_state.task_difficulty.upper()}")
+        logger.info(f"Original prompt ({len(original_prompt.split())} words): {original_prompt[:80]}...")
 
         prev_reward = 0.0
         prev_response = ""
@@ -236,10 +242,7 @@ async def run_episode(llm: OpenAI) -> None:
                 reward = result.reward          # server puts reward at top-level, not inside obs
                 done = result.done or (step >= MAX_STEPS)
                 prev_response = obs.llm_response
-                print(
-                    f"[DEBUG] tokens in={obs.input_tokens} out={obs.output_tokens}",
-                    flush=True,
-                )
+                logger.info(f"Step {step} Tokens => Input: {obs.input_tokens}, Output: {obs.output_tokens}")
             except Exception as exc:
                 error_msg = str(exc)
                 done = True
@@ -263,7 +266,7 @@ async def run_episode(llm: OpenAI) -> None:
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as exc:
-        print(f"[DEBUG] Episode error: {exc}", flush=True)
+        logger.error(f"Episode error aborted run: {exc}")
     finally:
         try:
             await env.close()
@@ -274,7 +277,7 @@ async def run_episode(llm: OpenAI) -> None:
 
 async def main() -> None:
     if not HF_TOKEN:
-        print("[ERROR] HF_TOKEN environment variable not set. Exiting.", flush=True)
+        logger.error("HF_TOKEN environment variable not set. Exiting.")
         return
 
     llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)

@@ -79,22 +79,22 @@ class TokenOptimiserState(State):
 
 ## 📋 Tasks
 
-### 🟢 Easy — Verbosity Reduction
-**Original:** `"Can you please explain in a very detailed manner what machine learning is and how it works step by step?"`  
-**Goal:** Strip filler words, compress to core query  
-**Expected optimized:** `"Explain machine learning briefly."`  
-**Max output:** 50 tokens
+### 🟢 Easy — Redundancy Stripping
+**Original:** `"Could you possibly help me understand, if it's not too much trouble, what the word 'photosynthesis' means? I would really appreciate it if you could explain it to me in simple terms that are easy to understand."`  
+**Goal:** Strip politeness filler and redundancy to a single direct question without formatting  
+**Expected optimized:** `"What does photosynthesis mean? Be brief."`  
+**Max output:** 30 tokens
 
-### 🟡 Medium — Format Constraint Addition
-**Original:** `"I need a comprehensive analysis of the renewable energy market trends over the past decade, including solar, wind, and hydroelectric power growth rates..."`  
-**Goal:** Compress input AND add explicit output format constraints  
-**Expected optimized:** `"Summarize 2013-2023 renewable energy trends: solar, wind, hydro. In 5 bullet points."`  
-**Max output:** 100 tokens
+### 🟡 Medium — Constraint Injection
+**Original:** `"I'm looking for information about the main differences between Python and JavaScript programming languages. Could you give me a thorough breakdown covering things like typing, use cases, performance, syntax style, and ecosystem so I can decide which one to learn first?"`  
+**Goal:** Compress input AND inject format + exactly 5 bullet point counts into prompt  
+**Expected optimized:** `"Compare Python and JavaScript (typing, use cases, performance, syntax, ecosystem) in exactly 5 bullet points."`  
+**Max output:** 120 tokens
 
-### 🔴 Hard — Multi-Intent Structured Output
-**Original:** 82-word complex data science analysis request with 5 sub-tasks  
-**Goal:** Minimize total tokens (input + output) while producing structured JSON with all 5 required keys  
-**Expected optimized:** Compressed prompt specifying `JSON with keys: top_categories, growth_regions, responsive_segments, budget_allocation, risks_watch`  
+### 🔴 Hard — Multi-Key JSON Extraction
+**Original:** `"We need you to analyze our e-commerce platform data and provide strategic insights. Specifically: first identify which product categories are performing best by revenue, second tell us which geographic regions show the most growth potential, third identify which customer segments respond best to promotions, fourth suggest how we should allocate our Q3 marketing budget across channels, and fifth flag any market risks we should be watching. Please be thorough in your analysis and provide detailed reasoning for each point."`  
+**Goal:** Compress 82-word multi-intent prompt and force structured JSON output with 5 exact required keys  
+**Expected optimized:** `"Analyze e-commerce data based on revenue, growth regions, responsive segments, Q3 budget, and market risks. Output strictly as JSON with keys: top_categories, growth_regions, responsive_segments, budget_allocation, risks_watch."`  
 **Max output:** 200 tokens
 
 ---

@@ -4,4 +4,7 @@ type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
-
+tasks:
+  - redundancy_stripping (easy)
+  - constraint_injection (medium)
+  - multi_key_json_extraction (hard)

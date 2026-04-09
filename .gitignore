@@ -34,3 +34,7 @@ outputs/
 
 # HF token cache (never commit tokens)
 .huggingface/
+
+
+# project details files
+details.md

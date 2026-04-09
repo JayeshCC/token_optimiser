@@ -11,9 +11,21 @@ A sandboxed LLM interaction environment where an AI agent optimizes both input p
 and expected output responses to minimize total token usage while maintaining correctness.
 """
 
+import json
+import logging
 import os
 import random
+import re
 from uuid import uuid4
+
+logger = logging.getLogger("TokenOptimiserBackend")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    # Add clear ANSI color prefixes for visibility in backend terminal
+    formatter = logging.Formatter('\033[94m%(asctime)s\033[0m | \033[92m%(levelname)-7s\033[0m | \033[1m%(message)s\033[0m', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 try:
     from openai import OpenAI
@@ -62,29 +74,30 @@ class TokenOptimiserEnvironment(Environment):
             # EASY TASK
             {
                 "difficulty": "easy",
-                "prompt": "Can you please explain in a very detailed manner what machine learning is and how it works step by step?",
-                "expected_format": "brief explanation",
-                "reference_response": "Machine learning is a subset of AI that enables computers to learn from data without explicit programming. It works by identifying patterns in training data to make predictions or decisions on new data.",
-                "max_output_tokens": 50,
-                "description": "Reduce verbosity while preserving core concept"
+                "prompt": "Could you possibly help me understand, if it's not too much trouble, what the word 'photosynthesis' means? I would really appreciate it if you could explain it to me in simple terms that are easy to understand.",
+                "expected_format": "plain_brief",
+                "reference_response": "Photosynthesis is how plants convert sunlight into food using CO2 and water.",
+                "max_output_tokens": 30,
+                "description": "Strip politeness filler and redundancy to a single direct question"
             },
             # MEDIUM TASK
             {
                 "difficulty": "medium",
-                "prompt": "I need a comprehensive analysis of the renewable energy market trends over the past decade, including solar, wind, and hydroelectric power growth rates, investment patterns, technological advancements, and policy impacts across different regions globally.",
-                "expected_format": "5 bullet points summarizing key trends",
-                "reference_response": "• Solar power capacity grew 22% annually avg.  • Wind energy investments reached $140B in 2020  • Hydroelectric remains largest renewable source  • Battery storage tech advancing rapidly  • Policy incentives driving global adoption",
-                "max_output_tokens": 100,
-                "description": "Compress input + specify bullet point format + length limit"
+                "prompt": "I'm looking for information about the main differences between Python and JavaScript programming languages. Could you give me a thorough breakdown covering things like typing, use cases, performance, syntax style, and ecosystem so I can decide which one to learn first?",
+                "expected_format": "bullet_5",
+                "reference_response": "• Python: dynamic typing, data/ML focus\n• JS: dynamic typing, web/frontend focus\n• Performance: JS V8 faster for runtime\n• Syntax: Python readable, JS C-like\n• Ecosystem: Python pip/sci libs, JS npm/frameworks",
+                "max_output_tokens": 120,
+                "description": "Compress input AND inject format + count constraint into prompt"
             },
             # HARD TASK
             {
                 "difficulty": "hard",
-                "prompt": "As a senior data scientist, I need you to analyze our Q3 sales performance dataset and provide actionable insights. The dataset contains: customer demographics, purchase history, product categories, regional sales data, marketing campaign ROI, seasonal trends, and competitor analysis. Please identify: 1) Our top 3 performing product categories and why, 2) Geographic regions with highest growth potential, 3) Customer segments most responsive to our email campaigns, 4) Optimal marketing budget allocation for Q4, and 5) Risks to watch based on economic indicators.",
-                "expected_format": "JSON with 5 keys: top_categories, growth_regions, responsive_segments, budget_allocation, risks_watch",
-                "reference_response": '{"top_categories": ["electronics", "software", "home_goods"], "growth_regions": ["SE Asia", "Latin America", "Africa"], "responsive_segments": ["young_professionals", "tech_enthusiasts"], "budget_allocation": {"email": 0.3, "social": 0.25, "search": 0.2, "tv": 0.15, "other": 0.1}, "risks_watch": ["inflation", "supply_chain", "labor_shortage"]}',
+                "prompt": "We need you to analyze our e-commerce platform data and provide strategic insights. Specifically: first identify which product categories are performing best by revenue, second tell us which geographic regions show the most growth potential, third identify which customer segments respond best to promotions, fourth suggest how we should allocate our Q3 marketing budget across channels, and fifth flag any market risks we should be watching. Please be thorough in your analysis and provide detailed reasoning for each point.",
+                "expected_format": "json_5keys",
+                "reference_response": '{"top_categories":"...","growth_regions":"...","responsive_segments":"...","budget_allocation":"...","risks_watch":"..."}',
+                "required_json_keys": ["top_categories", "growth_regions", "responsive_segments", "budget_allocation", "risks_watch"],
                 "max_output_tokens": 200,
-                "description": "Multi-intent optimization: compress complex request + specify JSON format + accuracy + length constraints"
+                "description": "Compress 82-word multi-intent prompt and force structured JSON output with 5 exact keys"
             }
         ]
 
@@ -105,6 +118,11 @@ class TokenOptimiserEnvironment(Environment):
             task_index=self._task_bank.index(self._current_task)
         )
         self._reset_count += 1
+
+        logger.info(f"------ ENVIRONMENT RESET ------")
+        logger.info(f"Loaded Task: [{self._current_task['difficulty'].upper()}] Index: {self._state.task_index}")
+        logger.info(f"Requirements: Format='{self._current_task['expected_format']}', Max Tokens={self._current_task['max_output_tokens']}")
+        logger.info(f"-------------------------------")
 
         return TokenOptimiserObservation(
             llm_response="",
@@ -143,12 +161,24 @@ class TokenOptimiserEnvironment(Environment):
         # 4. Format compliance (0.0-0.2)
         expected_fmt = self._current_task["expected_format"]
         format_score = 0.0
-        if "bullet" in expected_fmt and any(c in llm_response for c in ("•", "*", "-", "\n")):
-            format_score = 0.2
-        elif "json" in expected_fmt.lower() and "{" in llm_response and "}" in llm_response:
-            format_score = 0.2
-        elif "brief" in expected_fmt and len(llm_response.split()) < 30:
-            format_score = 0.2
+        if expected_fmt == "bullet_5":
+            bullet_count = llm_response.count('•')
+            if bullet_count >= 5:
+                format_score = 0.2
+            elif 3 <= bullet_count <= 4:
+                format_score = 0.1
+        elif expected_fmt == "json_5keys":
+            try:
+                parsed = json.loads(llm_response.strip())
+                keys_present = sum(1 for k in self._current_task["required_json_keys"] if k in parsed)
+                format_score = 0.04 * keys_present
+            except json.JSONDecodeError:
+                format_score = 0.0
+        elif expected_fmt == "plain_brief":
+            sentences = len([s for s in re.split(r'[.!?]+', llm_response) if s.strip()])
+            has_no_bullets = not any(c in llm_response for c in ("•", "-", "*"))
+            if sentences <= 2 and has_no_bullets:
+                format_score = 0.2
 
         # 5. Length penalty if output way too long
         max_out = self._current_task["max_output_tokens"]
@@ -163,10 +193,11 @@ class TokenOptimiserEnvironment(Environment):
         )
         reward = max(0.0, min(1.0, reward))
 
-        print(
-            f"[ENV] tok_eff={token_efficiency:.2f} semantic={semantic_score:.2f} "
-            f"fmt={format_score:.2f} => reward={reward:.2f}",
-            flush=True,
+        logger.info(f"[STEP {self._state.step_count}] Optimized Prompt Length: {len(optimized_prompt.split())} words")
+        logger.info(f"  └─ Tokens => In: {int(input_tokens)}, Out: {int(output_tokens)}")
+        logger.info(
+            f"  └─ Reward => Tok_Eff:{token_efficiency:.2f} | Semantic:{semantic_score*0.3:.2f} | "
+            f"Fmt:{format_score:.2f} | Penalty:{length_penalty:.2f} || TOTAL: {reward:.3f}"
         )
 
         return TokenOptimiserObservation(
@@ -196,13 +227,14 @@ class TokenOptimiserEnvironment(Environment):
                     return text, in_tok, out_tok
                 except Exception as e:
                     if "429" in str(e) or "Too Many Requests" in str(e):
-                        print(f"[ENV] Rate limited, waiting 3s (attempt {attempt+1})...")
+                        logger.warning(f"Rate limited, waiting 3s (attempt {attempt+1})...")
                         time.sleep(3)
                     else:
-                        print(f"[ENV] LLM call failed: {e}")
+                        logger.error(f"LLM call failed: {e}")
                         break
 
         # Rule-based fallback
+        logger.debug("Falling back to rule-based simulation.")
         return self._fallback_simulate(prompt)
 
     def _fallback_simulate(self, prompt: str) -> tuple[str, int, int]:
