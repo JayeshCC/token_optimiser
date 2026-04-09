@@ -17,6 +17,7 @@ Environment variables required:
 import asyncio
 import logging
 import os
+import sys
 import textwrap
 from typing import List, Optional
 
@@ -31,7 +32,7 @@ from token_optimiser import TokenOptimiserEnv, TokenOptimiserAction
 logger = logging.getLogger("TokenOptimiserFrontend")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(stream=sys.stderr)
     formatter = logging.Formatter('\033[96m%(asctime)s\033[0m | \033[93m%(levelname)-7s\033[0m | \033[1mCLIENT\033[0m | %(message)s', datefmt='%H:%M:%S')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
@@ -47,7 +48,8 @@ HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN")
 TASK_NAME: str = "token_optimization"
 BENCHMARK: str = "token_optimiser"
 MAX_STEPS: int = 5
-TEMPERATURE: float = 0.3
+TASK_EVAL_ROUNDS: int = 3
+TEMPERATURE: float = 0.0
 MAX_TOKENS: int = 200
 SUCCESS_THRESHOLD: float = 0.6
 
@@ -92,11 +94,11 @@ def log_start(task: str, env: str, model: str) -> None:
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    # Truncate action for readability but keep it on one line
-    action_short = action.replace("\n", " ")[:120]
+    # Keep the action on one line, but do not change its content otherwise.
+    action_short = action.replace("\n", " ")
     error_val = error if error else "null"
     print(
-        f"[STEP] step={step} action={action_short!r} "
+        f"[STEP] step={step} action={action_short} "
         f"reward={reward:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
@@ -105,8 +107,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -139,13 +140,16 @@ def _build_user_message(original_prompt: str, step: int,
 
 
 def get_optimized_prompt(
-    llm: OpenAI,
+    llm: Optional[OpenAI],
     original_prompt: str,
     step: int,
     prev_reward: float,
     prev_response: str,
     history: List[str],
 ) -> str:
+    if llm is None:
+        return _rule_based_compress(original_prompt, step)
+
     user_msg = _build_user_message(original_prompt, step, prev_reward, prev_response, history)
     try:
         completion = llm.chat.completions.create(
@@ -196,11 +200,71 @@ def _rule_based_compress(original_prompt: str, step: int = 1) -> str:
 # Main episode loop
 # ---------------------------------------------------------------------------
 
-async def run_episode(llm: OpenAI) -> None:
+async def _run_single_task_episode(llm: Optional[OpenAI], env: TokenOptimiserEnv, step_offset: int) -> tuple[List[float], int]:
     rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+
+    # Reset — get initial observation
+    reset_result = await env.reset()
+
+    # Fetch original prompt from server state
+    env_state = await env.state()
+    original_prompt: str = env_state.original_prompt or "Explain machine learning briefly."
+    task_label = getattr(env_state, "task_difficulty", "unknown")
+
+    logger.info(f"Task connected. Difficulty: {task_label.upper()}")
+    logger.info(f"Original prompt ({len(original_prompt.split())} words): {original_prompt[:80]}...")
+
+    prev_reward = 0.0
+    prev_response = ""
+    history: List[str] = []
+
+    for local_step in range(1, MAX_STEPS + 1):
+        global_step = step_offset + local_step
+
+        # Ask LLM to optimize the prompt
+        optimized = get_optimized_prompt(
+            llm, original_prompt, local_step, prev_reward, prev_response, history
+        )
+
+        # Step the environment with the optimized prompt
+        error_msg: Optional[str] = None
+        reward = 0.0
+        done = False
+        try:
+            result = await env.step(TokenOptimiserAction(optimized_prompt=optimized))
+            obs = result.observation
+            reward = result.reward          # server puts reward at top-level, not inside obs
+            done = result.done or (local_step >= MAX_STEPS)
+            prev_response = obs.llm_response
+            logger.info(f"Step {global_step} Tokens => Input: {obs.input_tokens}, Output: {obs.output_tokens}")
+            if getattr(obs, "done_reason", ""):
+                logger.info(f"Step {global_step} DoneReason => {obs.done_reason}")
+        except Exception as exc:
+            error_msg = str(exc)
+            done = True
+
+        rewards.append(reward)
+        steps_taken = local_step
+        prev_reward = reward
+        history.append(f"step={global_step} prompt={optimized!r:.60} reward={reward:.2f}")
+
+        log_step(step=global_step, action=optimized, reward=reward, done=done, error=error_msg)
+
+        if done:
+            break
+
+        # Wait between steps to avoid rate limiting
+        await asyncio.sleep(2.5)
+
+    return rewards, steps_taken
+
+
+async def run_episode(llm: Optional[OpenAI]) -> None:
+    rewards: List[float] = []
+    steps_taken = 0
     success = False
+    score = 0.0
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
@@ -212,55 +276,16 @@ async def run_episode(llm: OpenAI) -> None:
         await env.connect()
 
     try:
-        # Reset — get initial observation
-        reset_result = await env.reset()
-
-        # Fetch original prompt from server state
-        env_state = await env.state()
-        original_prompt: str = env_state.original_prompt or "Explain machine learning briefly."
-
-        logger.info(f"Task connected. Difficulty: {env_state.task_difficulty.upper()}")
-        logger.info(f"Original prompt ({len(original_prompt.split())} words): {original_prompt[:80]}...")
-
-        prev_reward = 0.0
-        prev_response = ""
-        history: List[str] = []
-
-        for step in range(1, MAX_STEPS + 1):
-            # Ask LLM to optimize the prompt
-            optimized = get_optimized_prompt(
-                llm, original_prompt, step, prev_reward, prev_response, history
+        for episode_index in range(TASK_EVAL_ROUNDS):
+            episode_rewards, episode_steps = await _run_single_task_episode(
+                llm=llm,
+                env=env,
+                step_offset=steps_taken,
             )
+            rewards.extend(episode_rewards)
+            steps_taken += episode_steps
 
-            # Step the environment with the optimized prompt
-            error_msg: Optional[str] = None
-            reward = 0.0
-            done = False
-            try:
-                result = await env.step(TokenOptimiserAction(optimized_prompt=optimized))
-                obs = result.observation
-                reward = result.reward          # server puts reward at top-level, not inside obs
-                done = result.done or (step >= MAX_STEPS)
-                prev_response = obs.llm_response
-                logger.info(f"Step {step} Tokens => Input: {obs.input_tokens}, Output: {obs.output_tokens}")
-            except Exception as exc:
-                error_msg = str(exc)
-                done = True
-
-            rewards.append(reward)
-            steps_taken = step
-            prev_reward = reward
-            history.append(f"step={step} prompt={optimized!r:.60} reward={reward:.2f}")
-
-            log_step(step=step, action=optimized, reward=reward, done=done, error=error_msg)
-
-            if done:
-                break
-                
-            # Wait between steps to avoid rate limiting
-            await asyncio.sleep(2.5)
-
-        # Score = average reward across steps, clamped to [0, 1]
+        # Success is based on average reward across steps, clamped to [0, 1].
         score = sum(rewards) / len(rewards) if rewards else 0.0
         score = max(0.0, min(1.0, score))
         success = score >= SUCCESS_THRESHOLD
@@ -277,10 +302,11 @@ async def run_episode(llm: OpenAI) -> None:
 
 async def main() -> None:
     if not HF_TOKEN:
-        logger.error("HF_TOKEN environment variable not set. Exiting.")
-        return
+        logger.warning("HF_TOKEN environment variable not set. Using deterministic fallback prompts.")
+        llm: Optional[OpenAI] = None
+    else:
+        llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
-    llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     await run_episode(llm)
 
 

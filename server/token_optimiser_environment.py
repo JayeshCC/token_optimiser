@@ -14,7 +14,6 @@ and expected output responses to minimize total token usage while maintaining co
 import json
 import logging
 import os
-import random
 import re
 from uuid import uuid4
 
@@ -58,6 +57,9 @@ class TokenOptimiserEnvironment(Environment):
         self._task_bank = self._load_task_bank()
         self._current_task = None
         self._reset_count = 0
+        self._last_prompt_norm = ""
+        self._best_reward = 0.0
+        self._stagnation_steps = 0
 
         # Hybrid LLM client — reads credentials from env vars at startup
         api_key = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
@@ -65,8 +67,10 @@ class TokenOptimiserEnvironment(Environment):
         self._model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
         if OpenAI and api_key:
             self._llm = OpenAI(base_url=api_base, api_key=api_key)
+            logger.info(f"LLM backend enabled (model={self._model})")
         else:
             self._llm = None
+            logger.warning("LLM backend unavailable; using deterministic fallback simulation and keyword judge.")
 
     def _load_task_bank(self):
         """Load the bank of prompt optimization tasks."""
@@ -108,8 +112,9 @@ class TokenOptimiserEnvironment(Environment):
         Returns:
             TokenOptimiserObservation with initial state
         """
-        # Select a random task
-        self._current_task = random.choice(self._task_bank)
+        # Cycle tasks in a fixed order so baseline runs are reproducible.
+        task_index = self._reset_count % len(self._task_bank)
+        self._current_task = self._task_bank[task_index]
         self._state = TokenOptimiserState(
             episode_id=str(uuid4()),
             step_count=0,
@@ -118,6 +123,9 @@ class TokenOptimiserEnvironment(Environment):
             task_index=self._task_bank.index(self._current_task)
         )
         self._reset_count += 1
+        self._last_prompt_norm = ""
+        self._best_reward = 0.0
+        self._stagnation_steps = 0
 
         logger.info(f"------ ENVIRONMENT RESET ------")
         logger.info(f"Loaded Task: [{self._current_task['difficulty'].upper()}] Index: {self._state.task_index}")
@@ -128,7 +136,9 @@ class TokenOptimiserEnvironment(Environment):
             llm_response="",
             input_tokens=0,
             output_tokens=0,
-            reward=0.0
+            reward=0.0,
+            done=False,
+            done_reason=""
         )
 
     def step(self, action: TokenOptimiserAction) -> TokenOptimiserObservation:  # type: ignore[override]
@@ -143,6 +153,8 @@ class TokenOptimiserEnvironment(Environment):
         """
         self._state.step_count += 1
         optimized_prompt = action.optimized_prompt
+        prompt_norm = " ".join(optimized_prompt.strip().lower().split())
+        prompt_changed = bool(prompt_norm) and prompt_norm != self._last_prompt_norm
         original_prompt = self._current_task["prompt"]
 
         # 1. Call real LLM (or fallback) to get the actual response + token counts
@@ -191,7 +203,34 @@ class TokenOptimiserEnvironment(Environment):
             + format_score              # 0.0 - 0.2   (format compliance)
             + length_penalty            # 0.0 or -0.1 (penalty)
         )
+        # Penalize no-op actions so each step requires substantive work.
+        if self._state.step_count > 1 and not prompt_changed:
+            reward -= 0.10
+
         reward = max(0.0, min(1.0, reward))
+
+        # Done logic: terminate on strong convergence or repeated non-improving/no-op steps.
+        done = False
+        done_reason = ""
+
+        improved = reward > (self._best_reward + 0.01)
+        if improved:
+            self._best_reward = reward
+            self._stagnation_steps = 0
+        else:
+            self._stagnation_steps += 1
+
+        if reward >= 0.90:
+            done = True
+            done_reason = "converged_high_reward"
+        elif self._state.step_count >= 2 and self._stagnation_steps >= 2:
+            done = True
+            done_reason = "stagnated_no_improvement"
+        elif self._state.step_count >= 2 and not prompt_changed:
+            done = True
+            done_reason = "no_substantive_action_change"
+
+        self._last_prompt_norm = prompt_norm
 
         logger.info(f"[STEP {self._state.step_count}] Optimized Prompt Length: {len(optimized_prompt.split())} words")
         logger.info(f"  └─ Tokens => In: {int(input_tokens)}, Out: {int(output_tokens)}")
@@ -199,12 +238,18 @@ class TokenOptimiserEnvironment(Environment):
             f"  └─ Reward => Tok_Eff:{token_efficiency:.2f} | Semantic:{semantic_score*0.3:.2f} | "
             f"Fmt:{format_score:.2f} | Penalty:{length_penalty:.2f} || TOTAL: {reward:.3f}"
         )
+        logger.info(
+            f"  └─ Progress => PromptChanged:{str(prompt_changed).lower()} | "
+            f"Stagnation:{self._stagnation_steps} | Done:{str(done).lower()} | Reason:{done_reason or 'null'}"
+        )
 
         return TokenOptimiserObservation(
             llm_response=llm_response,
             input_tokens=int(input_tokens),
             output_tokens=int(output_tokens),
-            reward=reward
+            reward=reward,
+            done=done,
+            done_reason=done_reason
         )
 
     def _call_llm(self, prompt: str) -> tuple[str, int, int]:
@@ -272,6 +317,7 @@ class TokenOptimiserEnvironment(Environment):
         Returns a float 0.0-1.0.
         """
         if self._llm is None:
+            logger.warning("Semantic judge fallback: no LLM client available.")
             return self._keyword_fallback_score(original_prompt, response)
 
         judge_prompt = (
@@ -289,7 +335,8 @@ class TokenOptimiserEnvironment(Environment):
             raw = (resp.choices[0].message.content or "5").strip()
             score = int("".join(c for c in raw if c.isdigit())[:2] or "5")
             return min(max(score / 10.0, 0.0), 1.0)
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Semantic judge fallback: judge call failed ({exc}).")
             return self._keyword_fallback_score(original_prompt, response)
 
     def _keyword_fallback_score(self, original_prompt: str, response: str) -> float:
@@ -298,9 +345,12 @@ class TokenOptimiserEnvironment(Environment):
             "machine", "learning", "ai", "data", "predict", "solar", "wind",
             "energy", "renewable", "sales", "customer", "product", "market",
             "budget", "analysis", "trend", "growth", "json", "bullet",
+            "python", "javascript", "typing", "performance", "syntax", "ecosystem",
         }
         orig = set(original_prompt.lower().split()) & key_concepts
         resp = set(response.lower().split()) & key_concepts
+        if not orig:
+            logger.warning("Keyword fallback is using neutral score because no tracked concepts were found in original prompt.")
         raw = (len(resp) / len(orig)) if orig else 0.5
         return min(raw, 1.0)
 
@@ -407,4 +457,124 @@ def grade(*args, **kwargs) -> float:
     Entry point for OpenEnv offline task validation. 
     Returns a unified float. Core RL grading is dynamically calculated in TokenOptimiserEnvironment.step().
     """
-    return 1.0
+    return _grade_redundancy_stripping(*args, **kwargs)
+
+
+def grade_redundancy_stripping(*args, **kwargs) -> float:
+    """Task-specific grader for redundancy_stripping."""
+    return _grade_redundancy_stripping(*args, **kwargs)
+
+
+def grade_constraint_injection(*args, **kwargs) -> float:
+    """Task-specific grader for constraint_injection."""
+    return _grade_constraint_injection(*args, **kwargs)
+
+
+def grade_multi_key_json_extraction(*args, **kwargs) -> float:
+    """Task-specific grader for multi_key_json_extraction."""
+    return _grade_multi_key_json_extraction(*args, **kwargs)
+
+
+def _extract_action_observation(*args, **kwargs) -> tuple[str, str, float, str]:
+    """
+    Extract optimized prompt, llm response, and base reward from flexible grader args.
+
+    Supports object-style and dict-style inputs since validation harnesses can vary.
+    """
+    action = kwargs.get("action")
+    observation = kwargs.get("observation") or kwargs.get("obs")
+
+    if action is None and len(args) >= 1:
+        action = args[0]
+    if observation is None and len(args) >= 2:
+        observation = args[1]
+
+    optimized_prompt = ""
+    llm_response = ""
+    reward = 0.0
+    done_reason = ""
+
+    if isinstance(action, dict):
+        optimized_prompt = str(action.get("optimized_prompt", ""))
+    elif action is not None:
+        optimized_prompt = str(getattr(action, "optimized_prompt", "") or "")
+
+    if isinstance(observation, dict):
+        llm_response = str(observation.get("llm_response", ""))
+        reward = float(observation.get("reward", 0.0) or 0.0)
+        done_reason = str(observation.get("done_reason", "") or "")
+    elif observation is not None:
+        llm_response = str(getattr(observation, "llm_response", "") or "")
+        reward = float(getattr(observation, "reward", 0.0) or 0.0)
+        done_reason = str(getattr(observation, "done_reason", "") or "")
+
+    return optimized_prompt, llm_response, max(0.0, min(1.0, reward)), done_reason
+
+
+def _grade_redundancy_stripping(*args, **kwargs) -> float:
+    optimized_prompt, llm_response, base_reward, done_reason = _extract_action_observation(*args, **kwargs)
+
+    # Reward concise rewrites that still produce plain, brief answers.
+    prompt_tokens = len(optimized_prompt.split()) if optimized_prompt else 0
+    concision_bonus = 0.2 if 1 <= prompt_tokens <= 30 else 0.0
+
+    sentences = len([s for s in re.split(r"[.!?]+", llm_response) if s.strip()])
+    plain_text_bonus = 0.2 if sentences <= 2 and not any(c in llm_response for c in ("•", "-", "*")) else 0.0
+
+    noop_penalty = 0.15 if done_reason in ("no_substantive_action_change", "stagnated_no_improvement") else 0.0
+
+    if optimized_prompt or llm_response:
+        return max(0.0, min(1.0, base_reward * 0.6 + concision_bonus + plain_text_bonus - noop_penalty))
+    return base_reward
+
+
+def _grade_constraint_injection(*args, **kwargs) -> float:
+    optimized_prompt, llm_response, base_reward, done_reason = _extract_action_observation(*args, **kwargs)
+
+    # Enforce the medium-task structure: exactly 5 bullet points.
+    bullet_count = llm_response.count("•")
+    if bullet_count == 0:
+        # Fallback for hyphen or asterisk bullets
+        lines = [line.strip() for line in llm_response.splitlines() if line.strip()]
+        bullet_count = sum(1 for line in lines if line.startswith("-") or line.startswith("*"))
+
+    format_bonus = 0.25 if bullet_count == 5 else (0.1 if 3 <= bullet_count <= 4 else 0.0)
+    brevity_bonus = 0.15 if len(optimized_prompt.split()) <= 45 and optimized_prompt else 0.0
+
+    noop_penalty = 0.15 if done_reason in ("no_substantive_action_change", "stagnated_no_improvement") else 0.0
+
+    if optimized_prompt or llm_response:
+        return max(0.0, min(1.0, base_reward * 0.6 + format_bonus + brevity_bonus - noop_penalty))
+    return base_reward
+
+
+def _grade_multi_key_json_extraction(*args, **kwargs) -> float:
+    optimized_prompt, llm_response, base_reward, done_reason = _extract_action_observation(*args, **kwargs)
+
+    required_keys = {
+        "top_categories",
+        "growth_regions",
+        "responsive_segments",
+        "budget_allocation",
+        "risks_watch",
+    }
+
+    key_bonus = 0.0
+    parse_bonus = 0.0
+    if llm_response:
+        try:
+            parsed = json.loads(llm_response.strip())
+            if isinstance(parsed, dict):
+                present = len(required_keys & set(parsed.keys()))
+                key_bonus = 0.3 * (present / len(required_keys))
+                parse_bonus = 0.15
+        except Exception:
+            key_bonus = 0.0
+
+    compression_bonus = 0.15 if len(optimized_prompt.split()) <= 65 and optimized_prompt else 0.0
+
+    noop_penalty = 0.15 if done_reason in ("no_substantive_action_change", "stagnated_no_improvement") else 0.0
+
+    if optimized_prompt or llm_response:
+        return max(0.0, min(1.0, base_reward * 0.4 + parse_bonus + key_bonus + compression_bonus - noop_penalty))
+    return base_reward

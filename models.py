@@ -25,6 +25,7 @@ class TokenOptimiserObservation(Observation):
     input_tokens: int = Field(default=0, description="Number of tokens in the optimized prompt")
     output_tokens: int = Field(default=0, description="Number of tokens in the LLM response")
     reward: float = Field(default=0.0, description="Reward score for this step (0.0-1.0)")
+    done_reason: str = Field(default="", description="Why the episode terminated (if done=true)")
 
 
 class TokenOptimiserState(State):

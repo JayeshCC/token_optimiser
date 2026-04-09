@@ -6,6 +6,8 @@ colorTo: purple
 sdk: docker
 app_port: 8000
 pinned: false
+tags:
+    - openenv
 ---
 
 # 🔤 Prompt & Response Token Optimization Environment
@@ -191,13 +193,24 @@ uv run inference.py
 Expected output:
 ```
 [START] task=token_optimization env=token_optimiser model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action='Analyze renewable energy trends...' reward=0.62 done=false error=null
-[STEP] step=2 action='Summarize 2013-2023 renewable energy...' reward=0.81 done=false error=null
-[STEP] step=3 action='Renewable energy trends 2013-2023...' reward=0.84 done=false error=null
-[STEP] step=4 action='Renewable energy 2013-2023 trends...' reward=0.82 done=false error=null
-[STEP] step=5 action='Energy trends 2013-2023: solar, wind...' reward=0.81 done=true error=null
-[END] success=true steps=5 score=0.780 rewards=0.62,0.81,0.84,0.82,0.81
+[STEP] step=1 action='...' reward=0.71 done=false error=null
+[STEP] step=4 action='...' reward=0.70 done=false error=null
+[STEP] step=7 action='...' reward=0.17 done=false error=null
+[END] success=false steps=9 score=0.487 rewards=0.71,0.66,0.60,0.70,0.68,0.64,0.17,0.14,0.10
 ```
+
+### 📊 Baseline Performance
+
+Current reproducible local baseline, measured with `HF_TOKEN` unset and the deterministic fallback path against the three-task cycle:
+
+| Task | Score |
+|------|-------|
+| Easy | 0.657 |
+| Medium | 0.673 |
+| Hard | 0.137 |
+| Aggregate | 0.487 |
+
+When `HF_TOKEN` is available, `inference.py` uses the OpenAI client against the Hugging Face router and can be rerun to regenerate model-backed scores.
 
 ### Step 3 — (Optional) Run via Docker
 
