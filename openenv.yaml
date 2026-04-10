@@ -9,14 +9,20 @@ tasks:
     name: "Redundancy Stripping"
     description: "Strip politeness filler and redundancy"
     difficulty: "easy"
-    grader: "server.token_optimiser_environment:grade_redundancy_stripping"
+    grader:
+      module: grader
+      function: grade_redundancy_stripping
   - id: "constraint_injection"
     name: "Constraint Injection"
     description: "Compress input AND inject exact bullet point constraints"
     difficulty: "medium"
-    grader: "server.token_optimiser_environment:grade_constraint_injection"
+    grader:
+      module: grader
+      function: grade_constraint_injection
   - id: "multi_key_json_extraction"
     name: "Multi-Key JSON Extraction"
     description: "Force structured JSON output with 5 exact keys"
     difficulty: "hard"
-    grader: "server.token_optimiser_environment:grade_multi_key_json_extraction"
+    grader:
+      module: grader
+      function: grade_multi_key_json_extraction
