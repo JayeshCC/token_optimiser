@@ -292,18 +292,17 @@ class TokenOptimiserEnvironment(Environment):
         original_words = len(self._current_task["prompt"].split())
         compression_ratio = len(prompt.split()) / max(original_words, 1)
 
-        if "brief explanation" in expected_format:
-            text = ("Machine learning is AI that learns from data to make predictions."
+        if expected_format == "plain_brief":
+            text = ("Photosynthesis is how plants use sunlight, water, and CO2 to produce food and release oxygen."
                     if compression_ratio <= 0.6
-                    else "Machine learning enables systems to learn from experience and improve without explicit programming.")
+                    else "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen.")
         elif "bullet" in expected_format:
-            text = ("• Solar power growing rapidly\n• Wind energy investments increasing\n• Hydroelectric power stable\n• Battery storage advancing\n• Global renewable adoption rising"
+            text = ("• Python: dynamically typed, ideal for data science and ML\n• JavaScript: dynamically typed, dominant in web/frontend development\n• Performance: JS V8 engine is faster at runtime; Python is slower\n• Syntax: Python is readable and concise; JS is C-like with more boilerplate\n• Ecosystem: Python has pip/sci-libs; JS has npm/frameworks"
                     if compression_ratio <= 0.7
-                    else "Renewable energy sectors are growing, led by solar and wind with strong policy support.")
+                    else "Python suits data/ML work; JavaScript suits web development. Both are dynamically typed.")
         elif "json" in expected_format.lower():
-            text = ('{"top_categories": ["electronics", "software"], "growth_regions": ["Asia", "Africa"], "responsive_segments": ["professionals"], "budget_allocation": {"email": 0.4, "social": 0.3}, "risks_watch": ["inflation"]}'  # noqa
-                    if compression_ratio <= 0.6
-                    else "Key categories: electronics, software. Growth in Asia and Africa.")
+            # Always return valid JSON for structured-output tasks
+            text = '{"top_categories": ["electronics", "software"], "growth_regions": ["Asia", "Africa"], "responsive_segments": ["professionals"], "budget_allocation": {"email": 0.4, "social": 0.3}, "risks_watch": ["inflation"]}'  # noqa
         else:
             text = "I understand your request and will provide a helpful response."
 
@@ -346,6 +345,8 @@ class TokenOptimiserEnvironment(Environment):
             "energy", "renewable", "sales", "customer", "product", "market",
             "budget", "analysis", "trend", "growth", "json", "bullet",
             "python", "javascript", "typing", "performance", "syntax", "ecosystem",
+            "photosynthesis", "plants", "sunlight", "co2", "oxygen", "glucose",
+            "carbon", "water", "light", "food", "leaves", "chlorophyll",
         }
         orig = set(original_prompt.lower().split()) & key_concepts
         resp = set(response.lower().split()) & key_concepts
