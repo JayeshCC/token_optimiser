@@ -164,7 +164,6 @@ def get_optimized_prompt(
         result = (completion.choices[0].message.content or "").strip()
         return result if result else "Explain briefly."
     except Exception as exc:
-        logger.warning(f"LLM call failed, falling back to basic rule compression: {exc}")
         return _rule_based_compress(original_prompt, step)
 
 
@@ -302,7 +301,6 @@ async def run_episode(llm: Optional[OpenAI]) -> None:
 
 async def main() -> None:
     if not HF_TOKEN:
-        logger.warning("HF_TOKEN environment variable not set. Using deterministic fallback prompts.")
         llm: Optional[OpenAI] = None
     else:
         llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
