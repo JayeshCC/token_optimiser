@@ -16,6 +16,44 @@ tags:
 
 ---
 
+## ⚠️ Hackathon Status — Action Required
+
+**Submission #6 failed Phase 2 validation.** All fixes have been applied and pushed. **Someone needs to resubmit from the dashboard before 12 April 2026, 11:59 PM IST.**
+
+### What was fixed (latest commits)
+
+| Commit | Fix |
+|--------|-----|
+| `c7fe490` | Fixed `openenv.yaml` — tasks had wrong format (plain strings, no `grader` field) |
+| `3dde704` | Each task now has its own grader function (`grade_redundancy_stripping`, etc.) |
+| `24eb57f` | Fixed fallback simulate domain responses + hard task always returns JSON |
+
+### Bugs fixed in `server/token_optimiser_environment.py`
+
+1. **Easy task fallback** — format check was `"brief explanation"` (never matched `"plain_brief"`), response was about machine learning instead of photosynthesis
+2. **Medium task fallback** — response was about solar/renewable energy instead of Python vs JavaScript
+3. **Hard task fallback** — JSON only returned when compression ratio ≤ 0.6; now always returns valid JSON with all 5 required keys
+4. **Keyword scorer** — added photosynthesis-domain keywords (plants, sunlight, co2, oxygen, etc.)
+
+### Updated baseline (no HF_TOKEN)
+
+| Task | Before | After fix |
+|------|--------|-----------|
+| Easy | 0.657 | ~0.75 |
+| Medium | 0.673 | ~0.49 |
+| Hard | 0.137 | ~0.60 |
+
+> Medium score may vary with the rule-based optimizer; with a real LLM it should score higher.
+
+### Checklist before resubmit
+- [x] `openenv.yaml` has 3 tasks with correct `grader` fields
+- [x] All 3 grader functions exist and are importable
+- [x] Fallback responses match actual task domains
+- [x] `inference.py` runs all 3 task rounds (`TASK_EVAL_ROUNDS = 3`)
+- [ ] **Resubmit from dashboard** → https://openenv.scaler.com (or wherever the dashboard is)
+
+---
+
 ## 📌 Introduction
 
 Large Language Model APIs charge per token. Verbose prompts and unconstrained responses waste tokens and money. This environment trains an AI agent to **rewrite verbose prompts into concise, efficient versions** that:
