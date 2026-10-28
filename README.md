@@ -167,7 +167,7 @@ reward = clamp(reward, 0.0, 1.0)
 ## ⚙️ Setup & Installation
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11+ (security-maintained dependency resolution; see SECURITY-STATUS.md)
 - [`uv`](https://github.com/astral-sh/uv) (recommended) or `pip`
 - A Hugging Face account with a token that has **Inference Providers** permission
 

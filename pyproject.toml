@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 name = "openenv-token_optimiser"
 version = "0.1.0"
 description = "Token Optimiser environment for OpenEnv"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
     # install from github
