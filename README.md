@@ -39,9 +39,9 @@ tags:
 
 | Task | Before | After fix |
 |------|--------|-----------|
-| Easy | 0.657 | ~0.75 |
-| Medium | 0.673 | ~0.49 |
-| Hard | 0.137 | ~0.60 |
+| Easy | 0.528 | ~0.75 |
+| Medium | 0.539 | ~0.49 |
+| Hard | 0.222 | ~0.60 |
 
 > Medium score may vary with the rule-based optimizer; with a real LLM it should score higher.
 
@@ -166,19 +166,25 @@ reward = clamp(reward, 0.0, 1.0)
 
 ## ⚙️ Setup & Installation
 
+### Runtime compatibility and security
+
+The project pins `openenv-core[core]==0.2.1`, a stable runtime that does not require Gradio or Pillow. This removes the vulnerable image-library dependency chain without overriding upstream requirements. The synchronous SDK is bridged with `asyncio.to_thread` in the async inference script. HTTP, persistent WebSockets, independent client sessions, and this release's native optional web UI are tested; newer Gradio-specific UI and async-SDK features are not included.
+
+Run the regression suite with `uv sync --locked --extra dev` followed by `uv run --locked python -m pytest -q`. See [SECURITY-STATUS.md](SECURITY-STATUS.md) for validation and the reason for the compatibility pin. Revisit the pin when a supported runtime can resolve patched UI dependencies.
+
 ### Prerequisites
 - Python 3.11+ (security-maintained dependency resolution; see SECURITY-STATUS.md)
 - [`uv`](https://github.com/astral-sh/uv) (recommended) or `pip`
-- A Hugging Face account with a token that has **Inference Providers** permission
+- For live provider calls: a Hugging Face account with an **Inference Providers** token. The deterministic fallback and regression tests need no token.
 
 ### 1. Clone and Install
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/JayeshCC/token_optimiser.git
 cd token_optimiser
 
 # Install with uv (recommended)
-uv sync
+uv sync --locked
 
 # Or with pip
 pip install -e .
@@ -187,7 +193,7 @@ pip install -e .
 ### 2. Set Environment Variables
 
 ```bash
-# Required
+# Optional: required only for live provider calls
 export HF_TOKEN="hf_your_token_here"
 
 # Optional (these are the defaults)
@@ -231,22 +237,22 @@ uv run inference.py
 Expected output:
 ```
 [START] task=token_optimization env=token_optimiser model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action='...' reward=0.71 done=false error=null
-[STEP] step=4 action='...' reward=0.70 done=false error=null
-[STEP] step=7 action='...' reward=0.17 done=false error=null
-[END] success=false steps=9 score=0.487 rewards=0.71,0.66,0.60,0.70,0.68,0.64,0.17,0.14,0.10
+[STEP] step=1 action='...' reward=0.61 done=false error=null
+[STEP] step=4 action='...' reward=0.55 done=false error=null
+[STEP] step=7 action='...' reward=0.25 done=false error=null
+[END] success=false steps=9 score=0.430 rewards=0.61,0.52,0.46,0.55,0.55,0.52,0.25,0.22,0.20
 ```
 
 ### 📊 Baseline Performance
 
-Current reproducible local baseline, measured with `HF_TOKEN` unset and the deterministic fallback path against the three-task cycle:
+Reproduced on 29 October 2026 with provider credentials unset, using the deterministic fallback across the three-task cycle. The unchanged original OpenEnv 0.3.0 runtime and the pinned 0.2.1 runtime both completed nine steps with aggregate score 0.430. The earlier 0.487 figure in this README was not reproduced; scoring code was not changed by the dependency fix:
 
 | Task | Score |
 |------|-------|
-| Easy | 0.657 |
-| Medium | 0.673 |
-| Hard | 0.137 |
-| Aggregate | 0.487 |
+| Easy | 0.528 |
+| Medium | 0.539 |
+| Hard | 0.222 |
+| Aggregate | 0.430 |
 
 When `HF_TOKEN` is available, `inference.py` uses the OpenAI client against the Hugging Face router and can be rerun to regenerate model-backed scores.
 

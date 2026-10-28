@@ -204,10 +204,10 @@ async def _run_single_task_episode(llm: Optional[OpenAI], env: TokenOptimiserEnv
     steps_taken = 0
 
     # Reset — get initial observation
-    reset_result = await env.reset()
+    reset_result = await asyncio.to_thread(env.reset)
 
     # Fetch original prompt from server state
-    env_state = await env.state()
+    env_state = await asyncio.to_thread(env.state)
     original_prompt: str = env_state.original_prompt or "Explain machine learning briefly."
     task_label = getattr(env_state, "task_difficulty", "unknown")
 
@@ -231,7 +231,7 @@ async def _run_single_task_episode(llm: Optional[OpenAI], env: TokenOptimiserEnv
         reward = 0.0
         done = False
         try:
-            result = await env.step(TokenOptimiserAction(optimized_prompt=optimized))
+            result = await asyncio.to_thread(env.step, TokenOptimiserAction(optimized_prompt=optimized))
             obs = result.observation
             reward = result.reward          # server puts reward at top-level, not inside obs
             done = result.done or (local_step >= MAX_STEPS)
@@ -269,10 +269,10 @@ async def run_episode(llm: Optional[OpenAI]) -> None:
 
     # Connect to environment
     if LOCAL_IMAGE_NAME:
-        env = await TokenOptimiserEnv.from_docker_image(LOCAL_IMAGE_NAME)
+        env = await asyncio.to_thread(TokenOptimiserEnv.from_docker_image, LOCAL_IMAGE_NAME)
     else:
         env = TokenOptimiserEnv(base_url=SERVER_URL)
-        await env.connect()
+        await asyncio.to_thread(env.connect)
 
     try:
         for episode_index in range(TASK_EVAL_ROUNDS):
@@ -293,7 +293,7 @@ async def run_episode(llm: Optional[OpenAI]) -> None:
         logger.error(f"Episode error aborted run: {exc}")
     finally:
         try:
-            await env.close()
+            await asyncio.to_thread(env.close)
         except Exception:
             pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)

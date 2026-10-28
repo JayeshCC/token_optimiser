@@ -14,10 +14,9 @@ version = "0.1.0"
 description = "Token Optimiser environment for OpenEnv"
 requires-python = ">=3.11"
 dependencies = [
-    # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
-    # install from github
-    # "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git",
-    "openenv-core[core]>=0.2.2",
+    # Stable synchronous runtime without the mandatory Gradio/Pillow chain.
+    # Re-evaluate this compatibility pin when the maintained UI supports patched Pillow.
+    "openenv-core[core]==0.2.1",
     # Environment-specific dependencies
     # Add all dependencies needed for your environment here
     # Examples:
